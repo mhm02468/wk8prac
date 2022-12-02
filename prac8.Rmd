@@ -1,0 +1,185 @@
+---
+title: "Prac8"
+output: html_document
+date: "2022-12-01"
+---
+
+## Loading Libraries; Downloading, Cleaning and Merging Data 
+
+```{r}
+library(tidyverse)
+library(tmap)
+library(geojsonio)
+library(plotly)
+library(rgdal)
+library(broom)
+library(mapview)
+library(crosstalk)
+library(sf)
+library(sp)
+library(spdep)
+library(car)
+library(fs)
+library(janitor)
+library(broom)
+tidy(model1)
+library(tidypredict)
+#library(tidymodels) = there is an issue with this package
+library(ggplot2)
+library(dplyr)
+
+download.file("https://data.london.gov.uk/download/statistical-gis-boundary-files-london/9ba8c833-6370-4b11-abdc-314aa020d5e0/statistical-gis-boundaries-london.zip", destfile="prac8_data/statistical-gis-boundaries-london.zip")
+
+listfiles <- dir_info(here::here("prac8_data")) %>% 
+  dplyr::filter(str_detect(path,".zip")) %>% 
+  dplyr::select(path) %>% 
+  pull() %>% 
+  print() %>% 
+  as.character() %>% 
+  utils::unzip(exdir=here::here("prac8_data"))
+
+Londonwards <- fs::dir_info(here::here("prac8_data", "statistical-gis-boundaries-london", "ESRI")) %>% 
+  #$ means exact match
+  dplyr::filter(str_detect(path,"London_Ward_CityMerged.shp$")) %>% 
+  dplyr::select(path) %>% 
+  dplyr::pull() %>% 
+  sf::st_read()
+
+LondonWardProfiles <- read_csv("https://data.london.gov.uk/download/ward-profiles-and-atlas/772d2d64-e8c6-46cb-86f9-e52b4c7851bc/ward-profiles-excel-version.csv",na = c("", "NA", "n/a"), col_names = TRUE,  locale = locale(encoding = 'Latin1'))
+
+Datatypelist <- LondonWardProfiles %>% 
+  summarise_all(class) %>% 
+  pivot_longer(everything(), names_to="All_variables", values_to="Variable_class")
+
+#merging london shapefile of wards and data
+LondonWardProfiles <- Londonwards %>% 
+  left_join(.,LondonWardProfiles, by = c("GSS_CODE" = "New code"))
+
+#map to check
+tmap_mode("plot")
+qtm(LondonWardProfiles, fill = "Average GCSE capped point scores - 2014", borders = NULL, fill.palette = "Blues")
+
+#london school location data
+
+london_schools <- read_csv("https://data.london.gov.uk/download/london-schools-atlas/57046151-39a0-45d9-8dc0-27ea7fd02de8/all_schools_xy_2016.csv")
+
+#make the csv into a spatial object
+lon_schools_sf <- st_as_sf(london_schools, coords = c("x", "y"), crs = 4326)
+
+#select just secondary schools because that is when you take the GCSEs
+lond_sec_schools_sf <- lon_schools_sf %>% 
+  filter(PHASE == "Secondary")
+
+tmap_mode("plot")
+qtm(lond_sec_schools_sf)
+```
+
+## Linear Regression Overview
+1. Think of a research Q: What are the factors that might lead to variation in Average GCSE point scores across the city? (Null hypothesis = there is no relationship). This practical will look at absence from school.
+
+**2. For linear regression, you need:**
+    **(1) There is a linear relationship between the dependent and independent variables**
+    **(2) Residuals/errors in your model should be normally distributed. Check via hist and then transform if necessary**
+    **(3) No Multicolinearity in the independent variables**
+    **(4) Homoscedasticity:errors/residuals in the model exhibit constant / homogenous variance **
+
+3. There are notes on a few packages that are useful for regression in the code below
+
+4. We can also double check that our fit is alright using bootstrap resampling (not in this prac but useful)
+
+5. How do we select variables? Well, you can use logic. BUT, there are also tests (that are not covered in this module). The tests are: subset regression, k-fold cross validation or gradient descent.
+
+6. Other regression methods such as Ridge, LASSO and elastic net regression can reduce the influence of variables that are not useful in the model. But again, this is beyond the scope of this module.
+
+```{r}
+#make a scatter plot
+q <- qplot(x = `Unauthorised Absence in All Schools (%) - 2013`, y = `Average GCSE capped point scores - 2014`, data=LondonWardProfiles)
+
+q + geom_jitter() + stat_smooth(method="lm", se=FALSE, size=1) #stat_smooth comes from ggplot2
+
+#make the regression model
+Regressiondata <- LondonWardProfiles %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(average_gcse_capped_point_scores_2014, unauthorised_absence_in_all_schools_percent_2013)
+
+model1 <- Regressiondata %>% 
+  lm(average_gcse_capped_point_scores_2014 ~ unauthorised_absence_in_all_schools_percent_2013, data=.)
+
+summary(model1)
+
+#tiding the output using the broom package and we can use the tidypredict package to see predictions for individual points. The latter adds a fit column to the code. The tidymodels package does something similar BUT it allows us to change our models more easily should we choose to do so.
+glance(model1)
+
+Regressiondata %>% tidypredict_to_column(model1)
+
+#This is the tidymodel package, but the library doesn't seem to load for me, so will come back to this
+#lm_mod <- linear_reg() #set the model
+#lm_fit <- lm_mod %>% #fit the model
+#  fit(average_gcse_capped_point_scores_2014 ~ unauthorised_absence_in_all_schools_percent_2013, data=Regressiondata)
+#tidy(lm_fit)
+```
+### Assumption 1: There is a linear relationship between the dependent and independent variables
+1.) If there is a nonlinear relationship, you need to transform the data. Doing so via Tukey’s ladder of transformations works well. So, you do (1) hist (2) tukey's ladder (3) change the power that the plot tells you
+
+```{r}
+#check the distribution of data for the variables
+ggplot(LondonWardProfiles, aes(x=`Average GCSE capped point scores - 2014`))+ geom_histogram(aes(y = ..density..), binwidth = 5)+geom_density(colour="purple", size=1,adjust=1) # the  ..density.. means the value of a histogram is a density plot
+
+ggplot(LondonWardProfiles, aes(x=`Unauthorised Absence in All Schools (%) - 2013`)) + geom_histogram(aes(y = ..density..), binwidth = 0.1)+geom_density(colour="purple", size=1,adjust=1)
+
+#comparing with median house prices (he changed name of column), which is quite different and needs to be transformed
+#for some reason this is not working... will need to address (the error is could not find function "%>%")
+
+LondonWardProfiles <- LondonWardProfiles %>% 
+  dplyr::rename(median_house_price_2014 =`Median House Price (£) - 2014`) %>% 
+  janitor::clean_names() 
+
+ggplot(LondonWardProfiles, aes(x=median_house_price_2014)) + geom_histogram()
+
+qplot(x = median_house_price_2014, y = average_gcse_capped_point_scores_2014, data=LondonWardProfiles)
+
+#Working through transformation
+
+ggplot(LondonWardProfiles, aes(x=log(median_house_price_2014))) + geom_histogram()
+
+symbox(~median_house_price_2014, LondonWardProfiles, na.rm=T, powers=seq(-3,3, by=.5))
+#where the boxplot seems normal will tell us what power to use when we transform our dataset
+
+#transform by raising to the power of -1
+ggplot(LondonWardProfiles, aes(x=log(median_house_price_2014)^-1))+geom_histogram()
+
+#Also, check via scatter plot
+qplot(x = (median_house_price_2014)^-1, y = average_gcse_capped_point_scores_2014, data=LondonWardProfiles)
+
+```
+
+### Assumption 2: Residuals/errors in your model should be normally distributed
+1.) plot the residuals on a hist; if not normally dist
+
+
+##Q: What do we do if the residuals are not normally dist? Do we just not run the regression? Do we transform? Do we change variables? If we transform, how does that affect the rest of the code and process?
+
+```{r}
+
+#save the residuals
+model_data <- model1 %>% 
+  augment(., Regressiondata)
+
+#plot
+model_data%>%
+dplyr::select(.resid)%>%
+  pull()%>%
+  qplot()+ geom_histogram() 
+```
+
+### Assumption 3: No Multicolinearity in the independent variables
+
+```{r}
+
+```
+
+### Assumption 4: Homoscedasticity:errors/residuals in the model exhibit constant / homogenous variance
+
+```{r}
+
+```
