@@ -27,6 +27,8 @@ library(tidypredict)
 #library(tidymodels) = there is an issue with this package
 library(ggplot2)
 library(dplyr)
+library(corrr)
+library(performance)
 
 download.file("https://data.london.gov.uk/download/statistical-gis-boundary-files-london/9ba8c833-6370-4b11-abdc-314aa020d5e0/statistical-gis-boundaries-london.zip", destfile="prac8_data/statistical-gis-boundaries-london.zip")
 
@@ -82,6 +84,7 @@ qtm(lond_sec_schools_sf)
     **(2) Residuals/errors in your model should be normally distributed. Check via hist and then transform if necessary**
     **(3) No Multicolinearity in the independent variables**
     **(4) Homoscedasticity:errors/residuals in the model exhibit constant / homogenous variance **
+    **(5) Independence of errors **
 
 3. There are notes on a few packages that are useful for regression in the code below
 
@@ -173,13 +176,164 @@ dplyr::select(.resid)%>%
 ```
 
 ### Assumption 3: No Multicolinearity in the independent variables
+1.) Used with multiple regression, this checks that two variables aren't over impacting the model/double counting. To do this, we use the "product moment correlation coefficient between the variables" from thecorrr() pacakge that is part of tidymodels.
+
+2.) We can also use VIF to check for multicolinearity
+
+## Q: why do we remove the residuals and add them to shape layer? Also, how do you decide position = c(10:74)
 
 ```{r}
+#adding in more variables
+Regressiondata2 <- LondonWardProfiles %>% 
+  clean_names() %>% 
+  dplyr::select(average_gcse_capped_point_scores_2014, unauthorised_absence_in_all_schools_percent_2013, median_house_price_2014)
+
+model2 <- lm(average_gcse_capped_point_scores_2014 ~ unauthorised_absence_in_all_schools_percent_2013 + log(median_house_price_2014), data = Regressiondata2)
+
+#show the summary of those outputs
+tidy(model2)
+glance(model2)
+
+#remove the residuals and add them to shape layer 
+model_data2 <- model2 %>%
+  augment(., Regressiondata2)
+
+LondonWardProfiles <- LondonWardProfiles %>%
+  mutate(model2resids = residuals(model2))
+
+#Check for multicolinearity
+Correlation <- LondonWardProfiles %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(average_gcse_capped_point_scores_2014, unauthorised_absence_in_all_schools_percent_2013, median_house_price_2014) %>%
+  mutate(median_house_price_2014=log(median_house_price_2014)) %>% 
+  correlate() %>% 
+  focus(-average_gcse_capped_point_scores_2014, mirror = TRUE)
+
+rplot(Correlation) #visualise the correlation matrix
+
+#VIF
+vif(model2)
+
+#Correlation Matrix for all of the variables
+position = c(10:74)
+Correlation_all<- LondonWardProfiles %>%
+  st_drop_geometry()%>%
+  dplyr::select(position)%>%
+    correlate()
+
+rplot(Correlation_all)
 
 ```
 
 ### Assumption 4: Homoscedasticity:errors/residuals in the model exhibit constant / homogenous variance
+1.) Why is this important? If your errors do not have constant variance, then your parameter estimates could be wrong, as could the estimates of their significance.
+2.) There are two ways to code plots to address this
+
+Here is what to look for in the plots:
+
+Residuals vs Fitted: a flat and horizontal line. This is looking at the linear relationship assumption between our variables
+
+Normal Q-Q: all points falling on the line. This checks if the residuals (observed minus predicted) are normally distributed
+
+Scale vs Location: flat and horizontal line, with randomly spaced points. This is the homoscedasticity (errors/residuals in the model exhibit constant / homogeneous variance). Are the residuals (also called errors) spread equally along all of the data.
+
+Residuals vs Leverage - Identifies outliers (or influential observations), the three largest outliers are identified with values in the plot.
+
+```{r}
+#Way 1 to plot to test for this criterion
+par(mfrow=c(2,2))
+plot(model2)
+
+#Way 2 to plot to test for this criterion, using the performance package
+library(performance)
+library(see)
+check_model(model2, check="all")
+```
+
+
+
+### Assumption 5: Independence of Errors
+1.) residual values (errors) must not be correlated. If they do, then they're autocorrelated which means something hasn't been accounted for in the model
+2.) For non-spatial data, we can use the *Durbin Watson test statistic*
+3.) FOR SPATIAL DATA
+      (1) Map the errors because you can visually get a sense (sometimes) if there are relationships btw the errors (i.e., contiguous polygons have similar values)
+      (2) Use Moran's I to map the autocorrelation
+
+
+**Q: How do we read the DW number? What do high/low values mean?**
+```{r}
+#check the DW
+DW <- durbinWatsonTest(model2)
+tidy(DW)
+
+#plot the residuals
+tmap_mode("view")
+tm_shape(LondonWardProfiles) + tm_polygons("model2resids", palette="RdYlBu") + tm_shape(lond_sec_schools_sf) + tm_dots(col="TYPE")
+
+#adjust for spatial autocorrelation: calculate centroids, create spatial weight matrix,
+
+coordsW <- LondonWardProfiles%>%
+  st_centroid()%>%
+  st_geometry()
+
+#this is a simple binary matrix of queens cas
+LWard_nb <- LondonWardProfiles %>%
+  poly2nb(., queen=T)
+
+#this is k nearest neighbours
+knn_wards <-coordsW %>%
+  knearneigh(., k=4)
+
+LWard_knn <- knn_wards %>% 
+  knn2nb()
+
+#create a spatial weights matrix object from these weights, here "W" = row standardising
+Lward.queens_weight <- LWard_nb %>%
+  nb2listw(., style="W")
+
+Lward.knn_4_weight <- LWard_knn %>%
+  nb2listw(., style="W")
+
+
+#Run the Moran's I
+Queen <- LondonWardProfiles %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(model2resids) %>% 
+  pull() %>% 
+  moran.test(., Lward.queens_weight) %>% 
+  tidy()
+
+Nearest_neighbour <- LondonWardProfiles %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(model2resids) %>% 
+  pull() %>% 
+  moran.test(., Lward.knn_4_weight) %>% 
+  tidy()
+
+Queen
+Nearest_neighbour
+
+# we can see that the Moran’s I statistic is somewhere between 0.27 and 0.29. Remembering that Moran’s I ranges from between -1 and +1 (0 indicating no spatial autocorrelation) we can conclude that there is some weak to moderate spatial autocorrelation in our residuals. This means that despite passing most of the assumptions of linear regression, we could have a situation here where the presence of some spatial autocorrelation could be leading to biased estimates of our parameters and significance values.
+
+```
+
+## Spatial Lag
 
 ```{r}
 
 ```
+
+## Spatial Error
+
+```{r}
+
+```
+
+## Geographically Weighted Regression
+
+```{r}
+
+```
+
+
+
