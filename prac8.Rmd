@@ -6,6 +6,8 @@ date: "2022-12-01"
 
 ## Loading Libraries; Downloading, Cleaning and Merging Data 
 
+KEY: YOU HAVE TO CHECK NORMAL (transform if not), MULTICOLINIARITY, CHECK ERRORS (performance package's check model) - map the residuals!
+
 ```{r}
 library(tidyverse)
 library(tmap)
@@ -29,6 +31,8 @@ library(ggplot2)
 library(dplyr)
 library(corrr)
 library(performance)
+library(spatialreg)
+library(lmtest)
 
 download.file("https://data.london.gov.uk/download/statistical-gis-boundary-files-london/9ba8c833-6370-4b11-abdc-314aa020d5e0/statistical-gis-boundaries-london.zip", destfile="prac8_data/statistical-gis-boundaries-london.zip")
 
@@ -83,7 +87,7 @@ qtm(lond_sec_schools_sf)
     **(1) There is a linear relationship between the dependent and independent variables**
     **(2) Residuals/errors in your model should be normally distributed. Check via hist and then transform if necessary**
     **(3) No Multicolinearity in the independent variables**
-    **(4) Homoscedasticity:errors/residuals in the model exhibit constant / homogenous variance **
+    **(4) Homoscedasticity:errors/residuals in the model exhibit constant / homogenous variance ** => if you have hetero then you probably have spatial autocorellation)
     **(5) Independence of errors **
 
 3. There are notes on a few packages that are useful for regression in the code below
@@ -317,9 +321,70 @@ Nearest_neighbour
 
 ```
 
-## Spatial Lag
+## Spatial Lag (lagged dependent variable)
+
+#### Key Terms
+**Rho** = the *spatial lag* that measures the variable in the surrounding spatial areas as defined by the spatial weight matrix. We use this as an extra explanatory variable to account for clustering (identified by Moran’s I)
+**Likelihood ratio (LR) test** *shows if the addition of the lag is an improvement and if that’s significant*. This code would give the same output… THIS IS BASICALLY MORAN'S I
+**Lagrange Multiplier (LM)** tests for the absence of spatial autocorrelation in the lag model's residuals. If it is significant you can reject the null hypothesis (no spatial autocorrelation) and accept the alternative (there *is* spatial autocorrelation)
+**Wald Test** tests if new parametres (the lag) should be included int he model. If the result is significant than it does need to be included. Very similar to the Lagrange test.
+ st_distance(points from and points to)
+**SIGNIFICANCE OF THESE IS THE P VALUE, use tidy()**
+
+#### Key Ideas
+1. This essentially addresses when Moran's I shows spatial autocorrelation and one spatial unit might be affected by another (there may be lag). In this specific instance, the model over-predicted GCSE scores (those shown in blue in the map above with negative residuals) and under-predicted (those shown in red/orange) occasionally were near to each other. Overlaying the schools suggests this might be impacted by students in a different ward going across a ward boundry to a different school and therefore impacting its scores. SO, the GCSE scores might actually be related to another spatial unit/ward.
+2. The solutions is to **incorporate a spatially-lagged version of this variable amongst the independent variables on the right-hand side of the equation.**
+3. In the equation: PWiYi means if neighbours have higher values they might have more affect on others (aka: average value for GCSE scores is expected to be higher if, on average, Wards neighbouring also have higher GCSE score values), and here the **p represents spatial lag**
+4. **you run a spatial lag regression model using a specific weight matrix**
+  Using the queens case (see the code below)
+  Using K nearest neighbours (see code below)
+5. Note on coefficients:  model is not consistent bc observations change based on the weight matrix neighbours selected which might vary (almost certainly in a distance based matrix) SO we don't interpret the results exactly in the same way as with normal linear regression coefficients. **The only way to do this is through calculating the impact of the spatial lag!** which is impacts(model)
+6. In order to compare the coefficients of the spatial lag model, you need to calculate the **"impact of the lag"** (code below) that can be determined in a variety of ways. There are direct and indirect components of this.
+
+
+
+
+
+#Q: why are you using a global standardisation instead of a row standardisation in slag_dv_model2_queen? **You can use "W" which is row, the numbers will probs just be bigger**
+#Q: can I just start with the lagrange multiplier test to tell if there is spatial autocorrelation? What does it mean for lm test and the wald test results to "be significant"? **Significance based on P value for the coefficient**
+
+NEW Q: What is the "direct" and "indirect"?
 
 ```{r}
+model2 <- lm(average_gcse_capped_point_scores_2014 ~ unauthorised_absence_in_all_schools_percent_2013 + log(median_house_price_2014), data =LondonWardProfiles)
+
+#Queens Case
+slag_dv_model2_queen <- lagsarlm(average_gcse_capped_point_scores_2014 ~ unauthorised_absence_in_all_schools_percent_2013 + log(median_house_price_2014), data =LondonWardProfiles, nb2listw(LWard_nb, style="C"), method = "eigen") #I CAN USE ROW
+
+t<-summary(slag_dv_model2_queen)
+
+lrtest(slag_dv_model2_queen, model2)
+
+#what do the outputs show?
+tidy(slag_dv_model2_queen)
+#glance(slag_dv_model2_queen)
+
+#calculate the impact of the spatial lag
+weight_list <- nb2listw(LWard_knn, style="C")
+imp <- impacts(slag_dv_model2_queen, listw=weight_list)
+
+##BEYOND THE SCOPE OF THE MODULE/WHAT WE REALLY NEED TO KNOW. This is used if you have a large data set and wish to do compute the direct and indirect.
+
+#calculating the lag impact by row, "W"
+slag_dv_model2_queen_row <- lagsarlm(average_gcse_capped_point_scores_2014 ~ unauthorised_absence_in_all_schools_percent_2013 +log(median_house_price_2014), data = LondonWardProfiles, nb2listw(LWard_nb, style="W"), method = "eigen")
+
+#This uses a sparse matrix. It takes two arguments: mult and MC
+W <- as(weight_list, "CsparseMatrix")
+trMatc <- trW(W, type="mult")
+trMC <- trW(W, type="MC")
+imp2 <- impacts(slag_dv_model2_queen_row, tr=trMatc, R=200)
+imp3 <- impacts(slag_dv_model2_queen_row, tr=trMC, R=200)
+sum <- summary(imp2,  zstats=TRUE, short=TRUE)
+
+#K Nearest Neighbours
+slag_dv_model2_knn4 <- lagsarlm(average_gcse_capped_point_scores_2014 ~ unauthorised_absence_in_all_schools_percent_2013 + log(median_house_price_2014), data = LondonWardProfiles, nb2listw(LWard_knn,style="C"),method = "eigen")
+
+tidy(slag_dv_model2_knn4)
 
 ```
 
